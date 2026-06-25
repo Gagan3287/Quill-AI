@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environment
+venv/
+env/
+.venv/
+.env/
+
+# Environment variables (NEVER commit secrets)
+.env
+.env.*
+!.env.example
+
+# Chroma vector database (auto-generated from uploads)
+chroma_db/
+
+# Temporary files
+temp_*.pdf
+temp_*.docx
+temp_*.pptx
+temp_*.txt
+
+# Test files
+test.pdf
+dummy_test.pptx
+
+# Compiled / cache
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node modules (frontend)
+node_modules/
+
+# Vite dist build
+dist/
+
+# Wheel packages (downloaded to project root)
+*.whl
+
+# Logs
+*.log

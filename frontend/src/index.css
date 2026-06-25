@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-primary: hsl(140 100% 47%);
+  --color-brand-secondary: hsl(193 100% 47%);
+  --color-brand-purple: #a855f7;
+  --color-brand-pink: #d946ef;
+  --color-brand-dark: #0d0d12;
+  --color-brand-surface: #13131a;
+  --color-brand-surface-light: #1e1e28;
+}
+
+/* Tailwind v4: enable class-based dark mode */
+@variant dark (&:where(.dark, .dark *));
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  @apply bg-[#0d0d12] text-gray-100 transition-colors duration-200;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
