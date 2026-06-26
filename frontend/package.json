@@ -4,10 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node generate-env.js && vite",
+    "build": "node generate-env.js && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "node generate-env.js && vite preview"
   },
   "dependencies": {
     "axios": "^1.18.0",

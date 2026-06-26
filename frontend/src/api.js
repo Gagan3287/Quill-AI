@@ -1,11 +1,14 @@
 import axios from 'axios';
 
-const API_URL = 'http://localhost:8000/api';
+const API_URL = (window.env && window.env.API_URL) || import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
 // Shared axios instance with timeout
 const api = axios.create({
   baseURL: API_URL,
   timeout: 120000, // 2 minute timeout for large files
+  headers: {
+    'Bypass-Tunnel-Reminder': 'true',
+  }
 });
 
 export const uploadPdf = async (files) => {
