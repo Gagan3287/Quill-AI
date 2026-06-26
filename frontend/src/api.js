@@ -1,15 +1,35 @@
 import axios from 'axios';
 
-const API_URL = (window.env && window.env.API_URL) || import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+const getStoredApiUrl = () => {
+  const stored = localStorage.getItem('API_URL');
+  if (stored) return stored;
+  
+  const envUrl = (window.env && window.env.API_URL) || import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  return envUrl;
+};
+
+export const getApiUrl = () => getStoredApiUrl();
 
 // Shared axios instance with timeout
-const api = axios.create({
-  baseURL: API_URL,
+export const api = axios.create({
+  baseURL: getStoredApiUrl(),
   timeout: 120000, // 2 minute timeout for large files
   headers: {
     'Bypass-Tunnel-Reminder': 'true',
   }
 });
+
+// Function to dynamically update the API URL at runtime
+export const updateApiUrl = (newUrl) => {
+  let sanitizedUrl = newUrl.trim();
+  if (sanitizedUrl && !sanitizedUrl.endsWith('/api') && !sanitizedUrl.endsWith('/api/')) {
+    sanitizedUrl = sanitizedUrl.replace(/\/$/, '') + '/api';
+  }
+  localStorage.setItem('API_URL', sanitizedUrl);
+  api.defaults.baseURL = sanitizedUrl;
+  return sanitizedUrl;
+};
+
 
 export const uploadPdf = async (files) => {
   const formData = new FormData();
