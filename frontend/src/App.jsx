@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Send, Upload, FileText, Trash2, Loader2, AlertCircle, PanelLeftClose, PanelLeftOpen, Globe } from 'lucide-react';
-import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl } from './api';
+import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl, initializeApiUrl } from './api';
 import MessageRenderer from './components/MarkdownRenderer';
 import Landing from './Landing';
 
@@ -36,7 +36,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fetchDocuments();
+    const init = async () => {
+      try {
+        const url = await initializeApiUrl();
+        setCustomApiUrl(url);
+      } catch (err) {
+        console.error("Failed to initialize API URL", err);
+      }
+      fetchDocuments();
+    };
+    init();
   }, []);
 
   const fetchDocuments = async () => {
@@ -259,33 +268,6 @@ function App() {
                 </div>
               ))
             )}
-          </div>
-
-          {/* API Connection settings */}
-          <div className="mt-6 border-t border-[#00000014] dark:border-[#ffffff14] pt-4 min-w-[256px]">
-            <h3 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-3 flex items-center gap-1.5">
-              <Globe size={13} className="text-brand-primary" />
-              API Connection
-            </h3>
-            <form onSubmit={handleSaveApiUrl} className="space-y-2">
-              <label htmlFor="api-url-input" className="text-xs text-gray-500 dark:text-gray-400 block">
-                Backend API URL:
-              </label>
-              <input
-                id="api-url-input"
-                type="text"
-                value={customApiUrl}
-                onChange={(e) => setCustomApiUrl(e.target.value)}
-                placeholder="http://localhost:8000/api"
-                className="w-full bg-brand-surface dark:bg-[#1a1a24] border border-gray-300 dark:border-[#ffffff14] rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-brand-primary text-gray-900 dark:text-gray-100"
-              />
-              <button
-                type="submit"
-                className="w-full bg-gradient-to-r from-brand-primary to-brand-secondary text-black font-semibold py-1.5 px-3 rounded-lg text-xs hover:opacity-90 transition-opacity"
-              >
-                Apply & Connect
-              </button>
-            </form>
           </div>
         </div>
       </div>

@@ -30,6 +30,45 @@ export const updateApiUrl = (newUrl) => {
   return sanitizedUrl;
 };
 
+// Automatically fetch the latest tunnel URL from Key-Value Store or GitHub if available
+export const initializeApiUrl = async () => {
+  // 1. Try Key-Value Store first (instant update, no Git/Vercel build delay)
+  try {
+    const res = await fetch('https://keyvalue.immanuel.co/api/KeyVal/GetValue/ndnbt2qd/tunnel_url');
+    if (res.ok) {
+      const base64 = await res.text();
+      if (base64 && base64.trim() && base64.trim() !== '""' && base64.trim() !== 'null') {
+        const cleanBase64 = base64.replace(/^"|"$/g, '').trim();
+        const url = atob(cleanBase64);
+        if (url && url.startsWith('http')) {
+          const sanitizedUrl = updateApiUrl(url);
+          console.log("Automatically resolved tunnel URL from Key-Value Store:", sanitizedUrl);
+          return sanitizedUrl;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Could not fetch tunnel URL from Key-Value Store, checking GitHub fallback:", err);
+  }
+
+  // 2. Try GitHub raw file as fallback
+  try {
+    const res = await fetch(`https://raw.githubusercontent.com/Gagan3287/Quill-AI/main/tunnel.txt?t=${Date.now()}`);
+    if (res.ok) {
+      const url = await res.text();
+      if (url && url.trim()) {
+        const sanitizedUrl = updateApiUrl(url.trim());
+        console.log("Automatically resolved tunnel URL from GitHub:", sanitizedUrl);
+        return sanitizedUrl;
+      }
+    }
+  } catch (err) {
+    console.warn("Could not automatically fetch tunnel URL from GitHub, using local fallback:", err);
+  }
+  return getApiUrl();
+};
+
+
 
 export const uploadPdf = async (files) => {
   const formData = new FormData();
