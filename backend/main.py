@@ -20,7 +20,7 @@ from rag import process_document, query_rag, list_documents, delete_document
 
 app = FastAPI(title="RAG Web Application")
 
-# Allow all for now during dev
+# Allow all for now during dev companion
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
