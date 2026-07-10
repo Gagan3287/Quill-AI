@@ -90,4 +90,5 @@ async def remove_document(filename: str):
 if __name__ == "__main__":
     # reload=False avoids multiprocessing.spawn forking a subprocess that
     # loses the env vars above and crashes with OpenBLAS WinError 1455
+    #clear response
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
