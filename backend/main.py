@@ -66,7 +66,8 @@ async def upload_files(files: List[UploadFile] = File(...)):
 async def chat(request: QueryRequest):
     try:
         loop = asyncio.get_event_loop()
-        # Also run query_rag in thread pool — it's CPU-heavy too
+        # Also run query_rag in thread pool
+        #— it's CPU-heavy too
         response = await loop.run_in_executor(None, partial(query_rag, request.query))
         return response
     except Exception as e:
