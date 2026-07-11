@@ -1,7 +1,7 @@
 import os
+import logging
 
-# Set thread counts to '4' to utilize CPU cores for fast embeddings
-# while keeping resource consumption balanced.
+# Must be set before any numpy/openblas import
 os.environ['OPENBLAS_NUM_THREADS'] = '4'
 os.environ['OMP_NUM_THREADS'] = '4'
 
@@ -17,164 +17,201 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CHROMA_PATH = "chroma_db"
+logger = logging.getLogger("quill_ai.rag")
 
-# Initialize embeddings
+# ── ChromaDB path ─────────────────────────────────────────────────────────────
+CHROMA_PATH = os.environ.get("CHROMA_PATH", "chroma_db")
+
+# ── L2 distance threshold for all-MiniLM-L6-v2 ───────────────────────────────
+# L2 distance range for this model is roughly 0.0 (identical) – 2.0 (unrelated).
+# 1.5 keeps only genuinely relevant chunks; tune downward to tighten relevance.
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "1.5"))
+
+# ── Embeddings (loaded once at module import) ─────────────────────────────────
+logger.info("Loading HuggingFace embeddings model…")
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+logger.info("Embeddings model loaded.")
 
-def get_db():
-    return Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
+# ── ChromaDB singleton ────────────────────────────────────────────────────────
+# One connection for the lifetime of the process; thread-safe for concurrent reads.
+_db: Chroma | None = None
 
-def process_document(filepath: str, filename: str):
-    if filename.endswith(".pdf"):
+
+def init_db() -> Chroma:
+    """Create (or return) the ChromaDB singleton. Called once at startup."""
+    global _db
+    if _db is None:
+        logger.info("Initialising ChromaDB at path: %s", CHROMA_PATH)
+        _db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
+        logger.info("ChromaDB ready.")
+    return _db
+
+
+def get_db() -> Chroma:
+    """Return the ChromaDB singleton, initialising lazily if needed."""
+    global _db
+    if _db is None:
+        init_db()
+    return _db
+
+
+# ── Document processing ───────────────────────────────────────────────────────
+def process_document(filepath: str, filename: str) -> None:
+    """Load a document, split into chunks, and add to ChromaDB."""
+    logger.info("process_document: loading '%s' from '%s'", filename, filepath)
+
+    if filename.lower().endswith(".pdf"):
         loader = PyPDFium2Loader(filepath)
-    elif filename.endswith(".docx"):
+        docs = loader.load()
+
+    elif filename.lower().endswith(".docx"):
         loader = Docx2txtLoader(filepath)
-    elif filename.endswith(".pptx"):
+        docs = loader.load()
+
+    elif filename.lower().endswith(".txt"):
+        loader = TextLoader(filepath, encoding="utf-8")
+        docs = loader.load()
+
+    elif filename.lower().endswith(".pptx"):
         # Use python-pptx directly — more reliable than UnstructuredPowerPointLoader
         prs = Presentation(filepath)
-        slides_text = []
+        docs = []
         for i, slide in enumerate(prs.slides):
-            slide_content = []
+            slide_lines = []
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     for para in shape.text_frame.paragraphs:
                         text = para.text.strip()
                         if text:
-                            slide_content.append(text)
-            if slide_content:
-                slides_text.append(
+                            slide_lines.append(text)
+            if slide_lines:
+                docs.append(
                     Document(
-                        page_content="\n".join(slide_content),
-                        metadata={"source": filepath, "page": i + 1}
+                        page_content="\n".join(slide_lines),
+                        metadata={"source": filepath, "page": i + 1},
                     )
                 )
-        if not slides_text:
-            raise ValueError("No readable text found in the PowerPoint file. Ensure the slides contain text content.")
-        # Add filename metadata and return early (no loader needed)
-        for doc in slides_text:
-            doc.metadata["source_file"] = filename
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = text_splitter.split_documents(slides_text)
-        if not splits:
-            raise ValueError("Could not extract any text chunks from the PowerPoint file.")
-        db = get_db()
-        db.add_documents(splits)
-        return
-    elif filename.endswith(".txt"):
-        loader = TextLoader(filepath)
+        if not docs:
+            raise ValueError(
+                "No readable text found in the PowerPoint file. "
+                "Ensure the slides contain text content."
+            )
+
     else:
-        raise ValueError("Unsupported file type")
-        
-    docs = loader.load()
-    
+        raise ValueError(f"Unsupported file type: {filename}")
+
     if not docs:
-        raise ValueError("No content could be extracted from the file. The file may be empty or corrupted.")
-    # Add filename to metadata
+        raise ValueError(
+            "No content could be extracted from the file. "
+            "The file may be empty or corrupted."
+        )
+
+    # Tag every chunk with the original filename for retrieval
     for doc in docs:
         doc.metadata["source_file"] = filename
-    
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splits = splitter.split_documents(docs)
     if not splits:
         raise ValueError("No text chunks could be extracted from the file.")
-    
-    db = get_db()
-    db.add_documents(splits)
 
-def query_rag(query_text: str):
+    logger.info("'%s' → %d chunks; adding to ChromaDB…", filename, len(splits))
+    get_db().add_documents(splits)
+    logger.info("'%s' ingested successfully.", filename)
+
+
+# ── RAG query ────────────────────────────────────────────────────────────────
+def query_rag(query_text: str) -> dict:
+    """Retrieve relevant chunks and answer the query via the LLM."""
+    logger.info("query_rag: '%s'", query_text[:80])
+
     db = get_db()
-    
-    # Similarity search (returns (document, distance))
-    # Note: Using distance rather than relevance_scores to avoid normalization issues
-    # With Chroma/L2, smaller distance = more similar
     results = db.similarity_search_with_score(query_text, k=3)
-    
-    # We define a threshold for distance. 
-    # For L2 with all-MiniLM-L6-v2, a distance < 1.5 is usually decent. We can tune this.
-    THRESHOLD = 100
-    
-    valid_results = [res for res in results if res[1] <= THRESHOLD]
-    
+
+    # Filter by L2 distance threshold
+    valid_results = [(doc, score) for doc, score in results if score <= SIMILARITY_THRESHOLD]
+    logger.info(
+        "similarity_search: %d total, %d below threshold (%.2f)",
+        len(results), len(valid_results), SIMILARITY_THRESHOLD,
+    )
+
     if not valid_results:
         return {
             "answer": "No data regarding this query is available in the uploaded documents.",
-            "sources": []
+            "sources": [],
         }
-    
-    context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in valid_results])
-    
-    prompt_template = """
-    You are an AI assistant answering questions based on the provided Context.
-    Use only the information in the Context. If the Context does not contain the answer, respond with 'I don't have enough information to answer that question.'
-    Context:
-    {context}
 
-    Question: {question}
-    """
-    
+    context_text = "\n\n---\n\n".join([doc.page_content for doc, _ in valid_results])
+
+    prompt_template = """You are an AI assistant answering questions based on the provided Context.
+Use only the information in the Context. If the Context does not contain the answer, respond with:
+'I don't have enough information to answer that question.'
+
+Context:
+{context}
+
+Question: {question}
+"""
     prompt = ChatPromptTemplate.from_template(prompt_template)
-    
     model = ChatGroq(model_name="llama-3.1-8b-instant", temperature=0)
-    
     chain = prompt | model
-    
-    # Invoke the LLM chain and safely extract the answer text
+
     try:
         response = chain.invoke({"context": context_text, "question": query_text})
-    except Exception as e:
-        # Log error (could be expanded) and fallback to empty response
-        response = None
-    # Extract answer text depending on response type
-    answer_text = None
-    if response is not None:
-        answer_text = getattr(response, "content", None)
-        if not answer_text:
-            # If the response object doesn't have .content or is empty, convert to string
-            answer_text = str(response).strip()
+        answer_text = getattr(response, "content", None) or str(response).strip()
+    except Exception as exc:
+        logger.error("LLM chain error: %s", exc)
+        answer_text = None
+
     if not answer_text:
         answer_text = "No data regarding this query is available in the uploaded documents."
 
-    
-    # Initialize sources list
+    # Deduplicated source snippets
     sources = []
-    # Using a set to prevent duplicate snippets if they somehow overlap exactly
-    seen_content = set()
-    for doc, _score in valid_results:
+    seen = set()
+    for doc, _ in valid_results:
         snippet = doc.page_content[:200] + "..."
-        if snippet not in seen_content:
+        if snippet not in seen:
             sources.append({
                 "source": doc.metadata.get("source_file", "Unknown"),
                 "page": doc.metadata.get("page", 0),
-                "content": snippet
+                "content": snippet,
             })
-            seen_content.add(snippet)
+            seen.add(snippet)
 
-    return {
-        "answer": answer_text,
-        "sources": sources
-    }
+    logger.info("query_rag completed. answer_len=%d sources=%d", len(answer_text), len(sources))
+    return {"answer": answer_text, "sources": sources}
 
-def list_documents():
-    db = get_db()
-    collection = db._collection
-    results = collection.get(include=["metadatas"])
-    
-    if not results or not results["metadatas"]:
+
+# ── Document management ───────────────────────────────────────────────────────
+def list_documents() -> list[str]:
+    """Return a list of unique source filenames stored in ChromaDB."""
+    try:
+        collection = get_db()._collection
+        results = collection.get(include=["metadatas"])
+        if not results or not results.get("metadatas"):
+            return []
+        unique_files = {
+            meta["source_file"]
+            for meta in results["metadatas"]
+            if "source_file" in meta
+        }
+        return sorted(unique_files)
+    except Exception as exc:
+        logger.error("list_documents error: %s", exc)
         return []
-        
-    unique_files = set()
-    for meta in results["metadatas"]:
-        if "source_file" in meta:
-            unique_files.add(meta["source_file"])
-            
-    return list(unique_files)
 
-def delete_document(filename: str):
-    db = get_db()
-    collection = db._collection
-    results = collection.get(where={"source_file": filename})
-    if results and results["ids"]:
-        collection.delete(ids=results["ids"])
-        return True
-    return False
+
+def delete_document(filename: str) -> bool:
+    """Delete all ChromaDB chunks associated with the given filename."""
+    try:
+        collection = get_db()._collection
+        results = collection.get(where={"source_file": filename})
+        if results and results.get("ids"):
+            collection.delete(ids=results["ids"])
+            logger.info("Deleted %d chunks for '%s'.", len(results["ids"]), filename)
+            return True
+        return False
+    except Exception as exc:
+        logger.error("delete_document error for '%s': %s", filename, exc)
+        return False

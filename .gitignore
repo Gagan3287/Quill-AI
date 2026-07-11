@@ -18,8 +18,17 @@ env/
 
 # Environment variables (NEVER commit secrets)
 .env
+.env.local
 .env.*
 !.env.example
+# Frontend env files — set real values in the Vercel dashboard, not here
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# Generated at build time by generate-env.js — not committed
+frontend/public/env.js
+public/env.js
 
 # Chroma vector database (auto-generated from uploads)
 chroma_db/
