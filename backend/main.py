@@ -27,8 +27,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import uvicorn
-from rag import process_document, query_rag, list_documents, delete_document, init_db
-
+from backend.rag import (
+    process_document,
+    query_rag,
+    list_documents,
+    delete_document,
+    init_db,
+)
 # ── Configuration from environment ───────────────────────────────────────────
 # Comma-separated list of allowed origins, e.g.:
 #   ALLOWED_ORIGINS=https://my-app.vercel.app,https://localhost:5173
