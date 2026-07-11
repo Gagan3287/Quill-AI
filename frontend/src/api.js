@@ -1,84 +1,93 @@
 import axios from 'axios';
 
-const getStoredApiUrl = () => {
+// ─────────────────────────────────────────────────────────────────────────────
+// API URL resolution
+//
+// Priority (highest → lowest):
+//   1. localStorage override  — set at runtime via updateApiUrl() (dev convenience)
+//   2. window.env.API_URL     — injected by generate-env.js at build/dev time
+//   3. import.meta.env.VITE_API_URL — Vite env var (set in .env or Vercel dashboard)
+//   4. localhost fallback     — local development default
+// ─────────────────────────────────────────────────────────────────────────────
+const resolveBaseUrl = () => {
   const stored = localStorage.getItem('API_URL');
   if (stored) return stored;
-  
-  const envUrl = (window.env && window.env.API_URL) || import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
-  return envUrl;
+
+  // window.env is written by generate-env.js into public/env.js
+  const windowEnv = window.env?.API_URL;
+  if (windowEnv && windowEnv !== 'undefined') return windowEnv;
+
+  return import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 };
 
-export const getApiUrl = () => getStoredApiUrl();
+export const getApiUrl = () => resolveBaseUrl();
 
-// Shared axios instance with timeout
-export const api = axios.create({
-  baseURL: getStoredApiUrl(),
-  timeout: 120000, // 2 minute timeout for large files
-  headers: {
-    'Bypass-Tunnel-Reminder': 'true',
+/**
+ * Override the API URL at runtime (stored in localStorage so it survives refresh).
+ * Useful during local dev to point at a different backend without rebuilding.
+ */
+export const updateApiUrl = (newUrl) => {
+  let url = newUrl.trim();
+  if (url && !url.endsWith('/api') && !url.endsWith('/api/')) {
+    url = url.replace(/\/$/, '') + '/api';
   }
+  localStorage.setItem('API_URL', url);
+  api.defaults.baseURL = url;
+  return url;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Axios instance
+// ─────────────────────────────────────────────────────────────────────────────
+export const api = axios.create({
+  baseURL: resolveBaseUrl(),
+  timeout: 120_000, // 2 min — large file uploads can be slow
 });
 
-// Function to dynamically update the API URL at runtime
-export const updateApiUrl = (newUrl) => {
-  let sanitizedUrl = newUrl.trim();
-  if (sanitizedUrl && !sanitizedUrl.endsWith('/api') && !sanitizedUrl.endsWith('/api/')) {
-    sanitizedUrl = sanitizedUrl.replace(/\/$/, '') + '/api';
-  }
-  localStorage.setItem('API_URL', sanitizedUrl);
-  api.defaults.baseURL = sanitizedUrl;
-  return sanitizedUrl;
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// Retry interceptor
+// Retries 502 / 503 / 504 (gateway / service unavailable / timeout) up to 2
+// times with exponential backoff (1 s, then 2 s).  These are transient infra
+// errors common on cold-start serverless backends.
+// ─────────────────────────────────────────────────────────────────────────────
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1_000;
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
 
-// Automatically fetch the latest tunnel URL from Key-Value Store or GitHub if available
-export const initializeApiUrl = async () => {
-  // 1. Try Key-Value Store first (instant update, no Git/Vercel build delay)
-  try {
-    const res = await fetch('https://keyvalue.immanuel.co/api/KeyVal/GetValue/ndnbt2qd/tunnel_url');
-    if (res.ok) {
-      const base64 = await res.text();
-      if (base64 && base64.trim() && base64.trim() !== '""' && base64.trim() !== 'null') {
-        const cleanBase64 = base64.replace(/^"|"$/g, '').trim();
-        const url = atob(cleanBase64);
-        if (url && url.startsWith('http')) {
-          const sanitizedUrl = updateApiUrl(url);
-          console.log("Automatically resolved tunnel URL from Key-Value Store:", sanitizedUrl);
-          return sanitizedUrl;
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("Could not fetch tunnel URL from Key-Value Store, checking GitHub fallback:", err);
-  }
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const config = error.config;
 
-  // 2. Try GitHub raw file as fallback
-  try {
-    const res = await fetch(`https://raw.githubusercontent.com/Gagan3287/Quill-AI/main/tunnel.txt?t=${Date.now()}`);
-    if (res.ok) {
-      const url = await res.text();
-      if (url && url.trim()) {
-        const sanitizedUrl = updateApiUrl(url.trim());
-        console.log("Automatically resolved tunnel URL from GitHub:", sanitizedUrl);
-        return sanitizedUrl;
-      }
-    }
-  } catch (err) {
-    console.warn("Could not automatically fetch tunnel URL from GitHub, using local fallback:", err);
-  }
-  return getApiUrl();
-};
+    // Only retry on network errors or specific HTTP statuses
+    const isRetryable =
+      !error.response || RETRYABLE_STATUSES.has(error.response?.status);
 
+    if (!isRetryable) return Promise.reject(error);
 
+    config._retryCount = (config._retryCount || 0) + 1;
+    if (config._retryCount > MAX_RETRIES) return Promise.reject(error);
 
+    const delay = RETRY_DELAY_MS * config._retryCount;
+    console.warn(
+      `[api] Retrying request (attempt ${config._retryCount}/${MAX_RETRIES}) after ${delay}ms — ${error.message}`,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return api(config);
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API helpers
+// ─────────────────────────────────────────────────────────────────────────────
 export const uploadPdf = async (files) => {
   const formData = new FormData();
-  for (let i = 0; i < files.length; i++) {
-    formData.append('files', files[i]);
+  for (const file of files) {
+    formData.append('files', file);
   }
   const response = await api.post('/upload', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
+    headers: { 'Content-Type': 'multipart/form-data' },
   });
   return response.data;
 };

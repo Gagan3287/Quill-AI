@@ -1,12 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Send, Upload, FileText, Trash2, Loader2, AlertCircle, PanelLeftClose, PanelLeftOpen, Globe } from 'lucide-react';
-import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl, initializeApiUrl } from './api';
+import { Send, Upload, FileText, Trash2, Loader2, AlertCircle, PanelLeftClose, PanelLeftOpen, LogOut } from 'lucide-react';
+import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl } from './api';
 import MessageRenderer from './components/MarkdownRenderer';
 import Landing from './Landing';
+import Login from './Login';
+import { supabase } from './supabase';
+
+// ── hash routing helper ──────────────────────────────────────────────────────
+const getHash = () => window.location.hash || '#/';
 
 function App() {
-  const darkMode = true; // Forced dark mode
+  const darkMode = true;
+  const [hash, setHash] = useState(getHash());
+  const [user, setUser] = useState(null);          // Supabase user object
+  const [authLoading, setAuthLoading] = useState(true); // waiting for session check
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [documents, setDocuments] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -14,46 +23,66 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
-  const [showApp, setShowApp] = useState(window.location.hash === '#/chat');
   const [customApiUrl, setCustomApiUrl] = useState(getApiUrl());
-
-  const goToChat = () => {
-    window.location.hash = '#/chat';
-  };
 
   const messagesEndRef = useRef(null);
 
+  // ── track hash changes ─────────────────────────────────────────────────────
   useEffect(() => {
-    const handleHashChange = () => {
-      setShowApp(window.location.hash === '#/chat');
-    };
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    const onHash = () => setHash(getHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  // ── Supabase auth state ────────────────────────────────────────────────────
   useEffect(() => {
     document.documentElement.classList.add('dark');
-  }, []);
 
-  useEffect(() => {
-    const init = async () => {
-      try {
-        const url = await initializeApiUrl();
-        setCustomApiUrl(url);
-      } catch (err) {
-        console.error("Failed to initialize API URL", err);
+    // Handle OAuth callback redirect
+    const handleCallback = async () => {
+      if (hash.startsWith('#/auth/callback') || hash.includes('access_token') || hash.includes('code=')) {
+        const { data, error } = await supabase.auth.getSession();
+        if (data?.session) {
+          setUser(data.session.user);
+          window.location.hash = '#/chat';
+          return;
+        }
       }
-      fetchDocuments();
     };
-    init();
+    handleCallback();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+      if (session?.user && (hash === '#/' || hash === '#/login' || hash.startsWith('#/auth'))) {
+        window.location.hash = '#/chat';
+      }
+    });
+
+    // Initial session check
+    supabase.auth.getSession().then(({ data }) => {
+      setUser(data.session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Fetch documents on mount ─────────────────────────────────────────────
+  useEffect(() => {
+    // API URL is resolved once from env vars — no dynamic tunnel discovery needed
+    setCustomApiUrl(getApiUrl());
+    fetchDocuments();
   }, []);
 
+  // ── helpers ────────────────────────────────────────────────────────────────
   const fetchDocuments = async () => {
     try {
       const data = await getDocuments();
       setDocuments(data.documents || []);
     } catch (err) {
-      console.error("Failed to fetch documents", err);
+      console.error('Failed to fetch documents', err);
     }
   };
 
@@ -61,40 +90,39 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  useEffect(() => { scrollToBottom(); }, [messages]);
 
+  // ── Sign out ───────────────────────────────────────────────────────────────
+  const handleSignOut = () => {
+    // Perform Supabase sign out in the background, don't await to avoid UI block on network timeout
+    supabase.auth.signOut().catch(err => {
+      console.warn('Supabase auth signout warning:', err);
+    });
+    setUser(null);
+    setMessages([]);
+    setDocuments([]);
+    window.location.hash = '#/';
+  };
+
+  // ── Upload handler ─────────────────────────────────────────────────────────
   const onDrop = async (acceptedFiles) => {
     if (acceptedFiles.length === 0) return;
     setIsUploading(true);
     setError(null);
-
-    // Safety timeout: force-reset uploading state after 60s no matter what
     const safetyTimer = setTimeout(() => {
       setIsUploading(false);
       setError('Upload timed out. Please try again.');
     }, 60000);
-
     try {
       const data = await uploadPdf(acceptedFiles);
       clearTimeout(safetyTimer);
-
       const errors = data.results.filter(r => r.status === 'error');
       const successes = data.results.filter(r => r.status === 'success');
-
       if (errors.length > 0) {
-        const errorMessages = errors.map(e => `${e.filename}: ${e.message || 'Unknown error'}`).join('\n');
-        setError(errorMessages);
+        setError(errors.map(e => `${e.filename}: ${e.message || 'Unknown error'}`).join('\n'));
       }
-
-      // Refresh document list separately — don't let this block completion
       if (successes.length > 0) {
-        try {
-          await fetchDocuments();
-        } catch (_fetchErr) {
-          console.warn('Could not refresh document list after upload:', _fetchErr);
-        }
+        try { await fetchDocuments(); } catch (_) {}
       }
     } catch (err) {
       clearTimeout(safetyTimer);
@@ -111,16 +139,14 @@ function App() {
     }
   };
 
-
-
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
       'application/pdf': ['.pdf'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
       'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
-      'text/plain': ['.txt']
-    }
+      'text/plain': ['.txt'],
+    },
   });
 
   const handleDelete = async (filename) => {
@@ -128,51 +154,86 @@ function App() {
       await deleteDocument(filename);
       await fetchDocuments();
     } catch (err) {
-      console.error("Failed to delete document", err);
+      console.error('Failed to delete document', err);
     }
-  };
-
-  const handleSaveApiUrl = (e) => {
-    e?.preventDefault();
-    const updated = updateApiUrl(customApiUrl);
-    setCustomApiUrl(updated);
-    setError(null);
-    fetchDocuments();
   };
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!inputMessage.trim()) return;
-
     const userMsg = { role: 'user', content: inputMessage };
     setMessages(prev => [...prev, userMsg]);
     setInputMessage('');
     setIsTyping(true);
-
     try {
       const response = await chatWithRag(userMsg.content);
-      const botMsg = {
-        role: 'bot',
-        content: response.answer,
-        sources: response.sources
-      };
-      setMessages(prev => [...prev, botMsg]);
+      setMessages(prev => [...prev, { role: 'bot', content: response.answer, sources: response.sources }]);
     } catch (err) {
-      const botMsg = {
-        role: 'bot',
-        content: "Sorry, an error occurred while processing your request.",
-        isError: true
-      };
-      setMessages(prev => [...prev, botMsg]);
+      setMessages(prev => [...prev, { role: 'bot', content: 'Sorry, an error occurred while processing your request.', isError: true }]);
     } finally {
       setIsTyping(false);
     }
   };
 
-  if (!showApp) {
-    return <Landing onGetStarted={goToChat} />;
+  // ── Routing ────────────────────────────────────────────────────────────────
+  if (authLoading) {
+    // Minimal dark loading screen while Supabase session hydrates
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#030206' }}>
+        <div style={{ width: 36, height: 36, border: '3px solid rgba(255,255,255,0.1)', borderTopColor: '#a855f7', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
   }
 
+  // OAuth callback – show spinner while session resolves
+  if (hash.startsWith('#/auth/callback') || hash.includes('access_token') || hash.includes('code=')) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#030206', flexDirection: 'column', gap: 16 }}>
+        <div style={{ width: 36, height: 36, border: '3px solid rgba(255,255,255,0.1)', borderTopColor: '#a855f7', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+        <p style={{ color: '#9c99b0', fontFamily: 'Plus Jakarta Sans, sans-serif', fontSize: '0.9rem' }}>Signing you in…</p>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  // Landing page
+  if (hash === '#/' || hash === '') {
+    return <Landing onGetStarted={() => { window.location.hash = user ? '#/chat' : '#/login'; }} />;
+  }
+
+  // Login page (redirect to chat if already authenticated)
+  if (hash === '#/login') {
+    if (user) { window.location.hash = '#/chat'; return null; }
+    return (
+      <Login
+        onBack={() => { window.location.hash = '#/'; }}
+        onGuestLogin={() => {
+          setUser({
+            email: 'guest@quillai.local',
+            user_metadata: {
+              full_name: 'Guest User',
+              name: 'Guest User'
+            }
+          });
+          window.location.hash = '#/chat';
+        }}
+      />
+    );
+  }
+
+  // Chat page (requires auth)
+  if (!user) {
+    window.location.hash = '#/login';
+    return null;
+  }
+
+  // ── User avatar helpers ────────────────────────────────────────────────────
+  const avatarUrl = user?.user_metadata?.avatar_url;
+  const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split('@')[0] || 'User';
+  const initials = displayName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+
+  // ── Chat UI ────────────────────────────────────────────────────────────────
   return (
     <div className="flex h-screen w-full overflow-hidden bg-brand-surface dark:bg-brand-dark transition-colors duration-200">
 
@@ -186,7 +247,7 @@ function App() {
           ${sidebarOpen ? 'w-72' : 'w-0'}
         `}
       >
-        {/* Sidebar header: logo left, toggle + theme right */}
+        {/* Sidebar header */}
         <div className="flex items-center justify-between px-4 pt-4 pb-2 min-w-[288px]">
           <img
             src={darkMode ? '/logo-dark.png' : '/logo-light.png'}
@@ -194,7 +255,6 @@ function App() {
             className="h-14 w-auto object-contain transition-opacity duration-200"
           />
           <div className="flex items-center gap-1">
-            {/* Close sidebar */}
             <button
               onClick={() => setSidebarOpen(false)}
               aria-label="Close sidebar"
@@ -232,7 +292,7 @@ function App() {
               <div>
                 <Upload size={28} className="mx-auto text-gray-400 mb-2" />
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  {isDragActive ? "Drop file here" : "Drag & drop PDF, Word, PPT, TXT"}
+                  {isDragActive ? 'Drop file here' : 'Drag & drop PDF, Word, PPT, TXT'}
                 </p>
               </div>
             )}
@@ -270,12 +330,40 @@ function App() {
             )}
           </div>
         </div>
+
+        {/* ── User profile + Sign out (bottom of sidebar) ── */}
+        <div className="border-t border-[#00000014] dark:border-[#ffffff14] min-w-[288px]">
+          <div className="flex items-center gap-3 px-4 py-3">
+            {/* Avatar */}
+            <div className="flex-shrink-0 w-9 h-9 rounded-full overflow-hidden bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white text-sm font-bold">
+              {avatarUrl ? (
+                <img src={avatarUrl} alt={displayName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+              ) : (
+                <span>{initials}</span>
+              )}
+            </div>
+            {/* Name + email */}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">{displayName}</p>
+              <p className="text-xs text-gray-400 truncate">{user?.email}</p>
+            </div>
+            {/* Sign out button */}
+            <button
+              onClick={handleSignOut}
+              aria-label="Sign out"
+              title="Sign out"
+              className="p-2 rounded-lg hover:bg-red-500/10 text-gray-400 hover:text-red-400 transition-colors flex-shrink-0"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* ── Main Chat Area ── */}
       <div className="flex-1 flex flex-col min-w-0">
 
-        {/* Top bar — shown only when sidebar is closed */}
+        {/* Top bar – shown when sidebar is closed */}
         {!sidebarOpen && (
           <div className="flex items-center gap-3 px-4 py-3 bg-[#fdfdfd] dark:bg-[#111118] border-b border-[#00000014] dark:border-[#ffffff14]">
             <button
@@ -287,7 +375,6 @@ function App() {
               <PanelLeftOpen size={20} />
             </button>
             <img src={darkMode ? '/logo-dark.png' : '/logo-light.png'} alt="Quill AI" className="h-8 w-auto object-contain transition-opacity duration-200" />
-
           </div>
         )}
 
@@ -342,9 +429,9 @@ function App() {
           {isTyping && (
             <div className="flex justify-start">
               <div className="bg-brand-surface dark:bg-brand-dark border border-[#00000014] dark:border-[#ffffff14] rounded-2xl rounded-bl-none p-4 shadow-sm flex space-x-2">
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }} />
               </div>
             </div>
           )}
@@ -359,7 +446,7 @@ function App() {
               id="chat-input"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              placeholder={documents.length > 0 ? "Ask a question about your documents..." : "Please upload a document first..."}
+              placeholder={documents.length > 0 ? 'Ask a question about your documents...' : 'Please upload a document first...'}
               aria-label="Ask a question about your uploaded documents"
               title="Ask a question about your uploaded documents"
               disabled={documents.length === 0}
