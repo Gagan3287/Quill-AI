@@ -19,7 +19,7 @@ load_dotenv()
 
 logger = logging.getLogger("quill_ai.rag")
 
-# ── ChromaDB path ─────────────────────────────────────────────────────────────
+# ── ChromaDB path ─────────────────────────────────────────────────────────────---
 CHROMA_PATH = os.environ.get("CHROMA_PATH", "chroma_db")
 
 # ── L2 distance threshold for all-MiniLM-L6-v2 ───────────────────────────────
