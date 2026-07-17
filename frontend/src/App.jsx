@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Send, Upload, FileText, Trash2, Loader2, AlertCircle, PanelLeftClose, PanelLeftOpen, LogOut } from 'lucide-react';
-import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl } from './api';
+import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl, clearSession, clearSessionOnUnload } from './api';
 import MessageRenderer from './components/MarkdownRenderer';
 import Landing from './Landing';
 import Login from './Login';
@@ -32,6 +32,20 @@ function App() {
     const onHash = () => setHash(getHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // ── Free backend storage if the tab/window is closed without signing out ──
+  // Covers guests especially: they rarely click "Sign out", they just close
+  // the tab. sendBeacon fires reliably during unload where a normal request
+  // would get cancelled by the browser.
+  useEffect(() => {
+    const onUnload = () => clearSessionOnUnload();
+    window.addEventListener('pagehide', onUnload);
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      window.removeEventListener('pagehide', onUnload);
+      window.removeEventListener('beforeunload', onUnload);
+    };
   }, []);
 
   // ── Supabase auth state ────────────────────────────────────────────────────
@@ -71,7 +85,6 @@ function App() {
 
   // ── Fetch documents on mount ─────────────────────────────────────────────
   useEffect(() => {
-    // API URL is resolved once from env vars — no dynamic tunnel discovery needed
     setCustomApiUrl(getApiUrl());
     fetchDocuments();
   }, []);
@@ -94,7 +107,13 @@ function App() {
 
   // ── Sign out ───────────────────────────────────────────────────────────────
   const handleSignOut = () => {
-    // Perform Supabase sign out in the background, don't await to avoid UI block on network timeout
+    // Free this session's documents on the backend immediately (guest or not —
+    // each browser tab has its own session_id, so this never touches anyone
+    // else's data). Fire-and-forget: don't block the UI on it.
+    clearSession().catch(err => {
+      console.warn('Session cleanup warning:', err);
+    });
+
     supabase.auth.signOut().catch(err => {
       console.warn('Supabase auth signout warning:', err);
     });
@@ -177,7 +196,6 @@ function App() {
 
   // ── Routing ────────────────────────────────────────────────────────────────
   if (authLoading) {
-    // Minimal dark loading screen while Supabase session hydrates
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#030206' }}>
         <div style={{ width: 36, height: 36, border: '3px solid rgba(255,255,255,0.1)', borderTopColor: '#a855f7', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
@@ -186,7 +204,6 @@ function App() {
     );
   }
 
-  // OAuth callback – show spinner while session resolves
   if (hash.startsWith('#/auth/callback') || hash.includes('access_token') || hash.includes('code=')) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#030206', flexDirection: 'column', gap: 16 }}>
@@ -197,12 +214,10 @@ function App() {
     );
   }
 
-  // Landing page
   if (hash === '#/' || hash === '') {
     return <Landing onGetStarted={() => { window.location.hash = user ? '#/chat' : '#/login'; }} />;
   }
 
-  // Login page (redirect to chat if already authenticated)
   if (hash === '#/login') {
     if (user) { window.location.hash = '#/chat'; return null; }
     return (
@@ -222,13 +237,11 @@ function App() {
     );
   }
 
-  // Chat page (requires auth)
   if (!user) {
     window.location.hash = '#/login';
     return null;
   }
 
-  // ── User avatar helpers ────────────────────────────────────────────────────
   const avatarUrl = user?.user_metadata?.avatar_url;
   const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split('@')[0] || 'User';
   const initials = displayName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
@@ -247,7 +260,6 @@ function App() {
           ${sidebarOpen ? 'w-72' : 'w-0'}
         `}
       >
-        {/* Sidebar header */}
         <div className="flex items-center justify-between px-4 pt-4 pb-2 min-w-[288px]">
           <img
             src={darkMode ? '/logo-dark.png' : '/logo-light.png'}
@@ -268,13 +280,11 @@ function App() {
 
         <div className="border-b border-[#00000014] dark:border-[#ffffff14] min-w-[288px]" />
 
-        {/* Sidebar body */}
         <div className="p-4 flex-1 overflow-y-auto min-w-[288px]">
           <h2 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-3">
             Documents
           </h2>
 
-          {/* Dropzone */}
           <div
             {...getRootProps()}
             className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-colors
@@ -331,10 +341,8 @@ function App() {
           </div>
         </div>
 
-        {/* ── User profile + Sign out (bottom of sidebar) ── */}
         <div className="border-t border-[#00000014] dark:border-[#ffffff14] min-w-[288px]">
           <div className="flex items-center gap-3 px-4 py-3">
-            {/* Avatar */}
             <div className="flex-shrink-0 w-9 h-9 rounded-full overflow-hidden bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white text-sm font-bold">
               {avatarUrl ? (
                 <img src={avatarUrl} alt={displayName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -342,12 +350,10 @@ function App() {
                 <span>{initials}</span>
               )}
             </div>
-            {/* Name + email */}
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">{displayName}</p>
               <p className="text-xs text-gray-400 truncate">{user?.email}</p>
             </div>
-            {/* Sign out button */}
             <button
               onClick={handleSignOut}
               aria-label="Sign out"
@@ -363,7 +369,6 @@ function App() {
       {/* ── Main Chat Area ── */}
       <div className="flex-1 flex flex-col min-w-0">
 
-        {/* Top bar – shown when sidebar is closed */}
         {!sidebarOpen && (
           <div className="flex items-center gap-3 px-4 py-3 bg-[#fdfdfd] dark:bg-[#111118] border-b border-[#00000014] dark:border-[#ffffff14]">
             <button
@@ -378,7 +383,6 @@ function App() {
           </div>
         )}
 
-        {/* Chat Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
           {messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-400">
@@ -405,7 +409,6 @@ function App() {
                     </div>
                   )}
 
-                  {/* Sources */}
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="mt-4 pt-3 border-t border-[#00000014] dark:border-[#ffffff14]">
                       <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Sources</p>
@@ -438,7 +441,6 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Area */}
         <div className="p-4 bg-[#fdfdfd] dark:bg-[#111118] border-t border-[#00000014] dark:border-[#ffffff14]">
           <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto relative">
             <input
