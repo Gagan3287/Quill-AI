@@ -23,8 +23,6 @@ logger = logging.getLogger("quill_ai.rag")
 CHROMA_PATH = os.environ.get("CHROMA_PATH", "chroma_db")
 
 # ── L2 distance threshold for all-MiniLM-L6-v2 ───────────────────────────────
-# L2 distance range for this model is roughly 0.0 (identical) – 2.0 (unrelated).
-# 1.5 keeps only genuinely relevant chunks; tune downward to tighten relevance.
 SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "1.5"))
 
 # ── Embeddings (loaded once at module import) ─────────────────────────────────
@@ -33,12 +31,10 @@ embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-
 logger.info("Embeddings model loaded.")
 
 # ── ChromaDB singleton ────────────────────────────────────────────────────────
-# One connection for the lifetime of the process; thread-safe for concurrent reads.
 _db: Chroma | None = None
 
 
 def init_db() -> Chroma:
-    """Create (or return) the ChromaDB singleton. Called once at startup."""
     global _db
     if _db is None:
         logger.info("Initialising ChromaDB at path: %s", CHROMA_PATH)
@@ -48,7 +44,6 @@ def init_db() -> Chroma:
 
 
 def get_db() -> Chroma:
-    """Return the ChromaDB singleton, initialising lazily if needed."""
     global _db
     if _db is None:
         init_db()
@@ -56,9 +51,9 @@ def get_db() -> Chroma:
 
 
 # ── Document processing ───────────────────────────────────────────────────────
-def process_document(filepath: str, filename: str) -> None:
-    """Load a document, split into chunks, and add to ChromaDB."""
-    logger.info("process_document: loading '%s' from '%s'", filename, filepath)
+def process_document(filepath: str, filename: str, session_id: str) -> None:
+    """Load a document, split into chunks, and add to ChromaDB — tagged with session_id."""
+    logger.info("process_document: loading '%s' from '%s' (session=%s)", filename, filepath, session_id)
 
     if filename.lower().endswith(".pdf"):
         loader = PyPDFium2Loader(filepath)
@@ -73,7 +68,6 @@ def process_document(filepath: str, filename: str) -> None:
         docs = loader.load()
 
     elif filename.lower().endswith(".pptx"):
-        # Use python-pptx directly — more reliable than UnstructuredPowerPointLoader
         prs = Presentation(filepath)
         docs = []
         for i, slide in enumerate(prs.slides):
@@ -106,29 +100,31 @@ def process_document(filepath: str, filename: str) -> None:
             "The file may be empty or corrupted."
         )
 
-    # Tag every chunk with the original filename for retrieval
+    # Tag every chunk with the original filename AND the owning session
     for doc in docs:
         doc.metadata["source_file"] = filename
+        doc.metadata["session_id"] = session_id
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = splitter.split_documents(docs)
     if not splits:
         raise ValueError("No text chunks could be extracted from the file.")
 
-    logger.info("'%s' → %d chunks; adding to ChromaDB…", filename, len(splits))
+    logger.info("'%s' → %d chunks; adding to ChromaDB (session=%s)…", filename, len(splits), session_id)
     get_db().add_documents(splits)
     logger.info("'%s' ingested successfully.", filename)
 
 
 # ── RAG query ────────────────────────────────────────────────────────────────
-def query_rag(query_text: str) -> dict:
-    """Retrieve relevant chunks and answer the query via the LLM."""
-    logger.info("query_rag: '%s'", query_text[:80])
+def query_rag(query_text: str, session_id: str) -> dict:
+    """Retrieve relevant chunks (scoped to this session only) and answer via the LLM."""
+    logger.info("query_rag: '%s' (session=%s)", query_text[:80], session_id)
 
     db = get_db()
-    results = db.similarity_search_with_score(query_text, k=3)
+    results = db.similarity_search_with_score(
+        query_text, k=3, filter={"session_id": session_id}
+    )
 
-    # Filter by L2 distance threshold
     valid_results = [(doc, score) for doc, score in results if score <= SIMILARITY_THRESHOLD]
     logger.info(
         "similarity_search: %d total, %d below threshold (%.2f)",
@@ -166,7 +162,6 @@ Question: {question}
     if not answer_text:
         answer_text = "No data regarding this query is available in the uploaded documents."
 
-    # Deduplicated source snippets
     sources = []
     seen = set()
     for doc, _ in valid_results:
@@ -183,12 +178,12 @@ Question: {question}
     return {"answer": answer_text, "sources": sources}
 
 
-# ── Document management ───────────────────────────────────────────────────────
-def list_documents() -> list[str]:
-    """Return a list of unique source filenames stored in ChromaDB."""
+# ── Document management (all scoped to a session) ────────────────────────────
+def list_documents(session_id: str) -> list[str]:
+    """Return unique source filenames stored in ChromaDB for this session only."""
     try:
         collection = get_db()._collection
-        results = collection.get(include=["metadatas"])
+        results = collection.get(where={"session_id": session_id}, include=["metadatas"])
         if not results or not results.get("metadatas"):
             return []
         unique_files = {
@@ -202,16 +197,37 @@ def list_documents() -> list[str]:
         return []
 
 
-def delete_document(filename: str) -> bool:
-    """Delete all ChromaDB chunks associated with the given filename."""
+def delete_document(filename: str, session_id: str) -> bool:
+    """Delete all chunks for the given filename, within this session only."""
     try:
         collection = get_db()._collection
-        results = collection.get(where={"source_file": filename})
+        results = collection.get(
+            where={"$and": [{"source_file": filename}, {"session_id": session_id}]}
+        )
         if results and results.get("ids"):
             collection.delete(ids=results["ids"])
-            logger.info("Deleted %d chunks for '%s'.", len(results["ids"]), filename)
+            logger.info("Deleted %d chunks for '%s' (session=%s).", len(results["ids"]), filename, session_id)
             return True
         return False
     except Exception as exc:
         logger.error("delete_document error for '%s': %s", filename, exc)
         return False
+
+
+def clear_session(session_id: str) -> int:
+    """Delete every chunk belonging to a session. Called on sign-out / tab close.
+
+    Returns the number of chunks removed (0 if nothing to do — always safe to call).
+    """
+    try:
+        collection = get_db()._collection
+        results = collection.get(where={"session_id": session_id}, include=[])
+        ids = results.get("ids", []) if results else []
+        if ids:
+            collection.delete(ids=ids)
+            logger.info("clear_session: removed %d chunks for session=%s", len(ids), session_id)
+        return len(ids)
+    except Exception as exc:
+        logger.error("clear_session error for session=%s: %s", session_id, exc)
+        return 0
+
