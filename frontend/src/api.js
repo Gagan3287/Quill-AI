@@ -1,19 +1,35 @@
 import axios from 'axios';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API URL resolution
+// Session id
 //
-// Priority (highest → lowest):
-//   1. localStorage override  — set at runtime via updateApiUrl() (dev convenience)
-//   2. window.env.API_URL     — injected by generate-env.js at build/dev time
-//   3. import.meta.env.VITE_API_URL — Vite env var (set in .env or Vercel dashboard)
-//   4. localhost fallback     — local development default
+// One random id per browser TAB, stored in sessionStorage (not localStorage) so
+// it's automatically gone when the tab/window closes — nothing to "forget" to
+// clean up client-side. Every upload/chat/documents request sends this as
+// X-Session-Id so the backend can scope ChromaDB storage per-session instead
+// of sharing one global bucket across every guest that's ever visited.
+// ─────────────────────────────────────────────────────────────────────────────
+const SESSION_KEY = 'quill_session_id';
+
+const getSessionId = () => {
+  let id = sessionStorage.getItem(SESSION_KEY);
+  if (!id) {
+    id = (crypto.randomUUID && crypto.randomUUID()) ||
+      `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    sessionStorage.setItem(SESSION_KEY, id);
+  }
+  return id;
+};
+
+export const sessionId = getSessionId();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API URL resolution
 // ─────────────────────────────────────────────────────────────────────────────
 const resolveBaseUrl = () => {
   const stored = localStorage.getItem('API_URL');
   if (stored) return stored;
 
-  // window.env is written by generate-env.js into public/env.js
   const windowEnv = window.env?.API_URL;
   if (windowEnv && windowEnv !== 'undefined') return windowEnv;
 
@@ -22,10 +38,6 @@ const resolveBaseUrl = () => {
 
 export const getApiUrl = () => resolveBaseUrl();
 
-/**
- * Override the API URL at runtime (stored in localStorage so it survives refresh).
- * Useful during local dev to point at a different backend without rebuilding.
- */
 export const updateApiUrl = (newUrl) => {
   let url = newUrl.trim();
   if (url && !url.endsWith('/api') && !url.endsWith('/api/')) {
@@ -41,14 +53,12 @@ export const updateApiUrl = (newUrl) => {
 // ─────────────────────────────────────────────────────────────────────────────
 export const api = axios.create({
   baseURL: resolveBaseUrl(),
-  timeout: 120_000, // 2 min — large file uploads can be slow
+  timeout: 120_000,
+  headers: { 'X-Session-Id': sessionId },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Retry interceptor
-// Retries 502 / 503 / 504 (gateway / service unavailable / timeout) up to 2
-// times with exponential backoff (1 s, then 2 s).  These are transient infra
-// errors common on cold-start serverless backends.
 // ─────────────────────────────────────────────────────────────────────────────
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1_000;
@@ -58,11 +68,8 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const config = error.config;
-
-    // Only retry on network errors or specific HTTP statuses
     const isRetryable =
       !error.response || RETRYABLE_STATUSES.has(error.response?.status);
-
     if (!isRetryable) return Promise.reject(error);
 
     config._retryCount = (config._retryCount || 0) + 1;
@@ -105,4 +112,29 @@ export const getDocuments = async () => {
 export const deleteDocument = async (filename) => {
   const response = await api.delete(`/documents/${encodeURIComponent(filename)}`);
   return response.data;
+};
+
+/**
+ * Wipe every document belonging to this session. Call on explicit sign-out.
+ */
+export const clearSession = async () => {
+  const response = await api.delete('/session');
+  return response.data;
+};
+
+/**
+ * Best-effort cleanup for when the user just closes the tab instead of
+ * clicking Sign Out (common for guests). sendBeacon fires even as the page
+ * is unloading, where a normal axios/fetch call would get cancelled.
+ * Note: sendBeacon only supports POST, so the backend also needs a POST
+ * alias for /api/session/beacon-clear if you want this path covered too —
+ * see main.py. Falls back to silently doing nothing if unsupported.
+ */
+export const clearSessionOnUnload = () => {
+  if (!navigator.sendBeacon) return;
+  const url = `${resolveBaseUrl().replace(/\/$/, '')}/session/beacon-clear`;
+  const blob = new Blob([JSON.stringify({ session_id: sessionId })], {
+    type: 'application/json',
+  });
+  navigator.sendBeacon(url, blob);
 };
