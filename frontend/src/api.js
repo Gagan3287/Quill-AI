@@ -28,7 +28,17 @@ export const sessionId = getSessionId();
 // ─────────────────────────────────────────────────────────────────────────────
 const resolveBaseUrl = () => {
   const stored = localStorage.getItem('API_URL');
-  if (stored) return stored;
+  // Guard against stale dev-only tunnel URLs (localtunnel, ngrok, etc.)
+  // lingering in localStorage from earlier local testing. These are never
+  // valid in production — if one is found, discard it automatically instead
+  // of silently routing every request to a dead endpoint.
+  const looksLikeDevTunnel = stored && /loca\.lt|ngrok|trycloudflare/i.test(stored);
+  if (looksLikeDevTunnel) {
+    console.warn(`[api] Ignoring stale dev-tunnel URL cached in localStorage: ${stored}`);
+    localStorage.removeItem('API_URL');
+  } else if (stored) {
+    return stored;
+  }
 
   const windowEnv = window.env?.API_URL;
   if (windowEnv && windowEnv !== 'undefined') return windowEnv;
