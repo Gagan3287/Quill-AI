@@ -5,9 +5,10 @@ import logging
 os.environ['OPENBLAS_NUM_THREADS'] = '4'
 os.environ['OMP_NUM_THREADS'] = '4'
 
-from langchain_community.document_loaders import PyPDFium2Loader, Docx2txtLoader, TextLoader
+from langchain_community.document_loaders import Docx2txtLoader, TextLoader
 from langchain_core.documents import Document
 from pptx import Presentation
+import pypdfium2 as pdfium
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
@@ -56,8 +57,39 @@ def process_document(filepath: str, filename: str, session_id: str) -> None:
     logger.info("process_document: loading '%s' from '%s' (session=%s)", filename, filepath, session_id)
 
     if filename.lower().endswith(".pdf"):
-        loader = PyPDFium2Loader(filepath)
-        docs = loader.load()
+        # Extract text page-by-page ourselves instead of relying on
+        # PyPDFium2Loader. That LangChain wrapper can silently switch between
+        # "one Document per page" and "one Document for the whole file"
+        # depending on the installed version, and in the latter mode there's
+        # no per-page metadata at all — every chunk then falls back to
+        # page=0, which is exactly the "Page 0 for everything" bug this
+        # replaces. Doing it directly guarantees correct 1-indexed pages.
+        pdf = pdfium.PdfDocument(filepath)
+        docs = []
+        try:
+            for i in range(len(pdf)):
+                page = pdf[i]
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_range().strip()
+                finally:
+                    textpage.close()
+                    page.close()
+                if text:
+                    docs.append(
+                        Document(
+                            page_content=text,
+                            metadata={"source": filepath, "page": i + 1},
+                        )
+                    )
+        finally:
+            pdf.close()
+
+        if not docs:
+            raise ValueError(
+                "No extractable text found in the PDF. It may be a scanned "
+                "or image-only document with no selectable text."
+            )
 
     elif filename.lower().endswith(".docx"):
         loader = Docx2txtLoader(filepath)
@@ -230,4 +262,3 @@ def clear_session(session_id: str) -> int:
     except Exception as exc:
         logger.error("clear_session error for session=%s: %s", session_id, exc)
         return 0
-
