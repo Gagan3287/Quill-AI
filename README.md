@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="frontend/public/landing.png" alt="Quill AI" width="120" />
+<img src="landing.png" alt="Quill AI" width="120" />
 
 # Quill AI
 
