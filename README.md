@@ -58,11 +58,11 @@ isolation, automatic cleanup, and CORS hardening.
 
 |                Landing Page                |               Chat with Sources             |
 | :------------------------------------------: | :------------------------------------------: |
-| ![Landing](docs/screenshots/landing.png)     | ![Chat](docs/screenshots/chat.png)            |
+| ![Landing](landing.png)                      | ![Chat]( chat.png)                            |
 
 |              Document Upload                |               Guest / Sign-in                |
 | :-------------------------------------------: | :-------------------------------------------: |
-| ![Upload](docs/screenshots/upload.png)       | ![Auth](docs/screenshots/auth.png)            |
+| ![Upload](upload.png)                          | ![Auth](/auth.png)                          |
 
 </div>
 
