@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Send, Upload, FileText, Trash2, Loader2, AlertCircle, PanelLeftClose, PanelLeftOpen, LogOut } from 'lucide-react';
-import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl, clearSession, clearSessionOnUnload } from './api';
+import { uploadPdf, chatWithRag, getDocuments, deleteDocument, getApiUrl, updateApiUrl, clearSession, clearSessionOnUnload, setAuthenticatedSessionId, resetToGuestSession, sessionId } from './api';
+import { saveChatMessage, loadChatHistory, saveDocumentToHistory, loadDocumentHistory, removeDocumentFromHistory } from './history';
 import MessageRenderer from './components/MarkdownRenderer';
 import Landing from './Landing';
 import Login from './Login';
@@ -89,6 +90,25 @@ function App() {
     fetchDocuments();
   }, []);
 
+  // ── Signed-in users: switch to a stable session + load persistent history ──
+  // Real Supabase users always have a `.id`; the guest object (set in
+  // onGuestLogin below) deliberately does not, so this only fires for real
+  // sign-ins — guests keep their existing ephemeral per-tab behavior.
+  const isRealUser = !!user?.id;
+
+  useEffect(() => {
+    if (!isRealUser) return;
+
+    setAuthenticatedSessionId(user.id);
+
+    (async () => {
+      const history = await loadChatHistory(user.id);
+      await fetchDocuments();
+      if (history.length > 0) setMessages(history);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRealUser, user?.id]);
+
   // ── helpers ────────────────────────────────────────────────────────────────
   const fetchDocuments = async () => {
     try {
@@ -107,9 +127,9 @@ function App() {
 
   // ── Sign out ───────────────────────────────────────────────────────────────
   const handleSignOut = () => {
-    // Free this session's documents on the backend immediately (guest or not —
-    // each browser tab has its own session_id, so this never touches anyone
-    // else's data). Fire-and-forget: don't block the UI on it.
+    // For guests this frees their session's documents immediately. For
+    // signed-in users this is a safe no-op — their documents persist by
+    // design (both api.js and the backend independently enforce this).
     clearSession().catch(err => {
       console.warn('Session cleanup warning:', err);
     });
@@ -117,6 +137,10 @@ function App() {
     supabase.auth.signOut().catch(err => {
       console.warn('Supabase auth signout warning:', err);
     });
+    // Drop onto a fresh, ephemeral guest session — otherwise a guest
+    // continuing in the same tab would inherit the just-signed-out user's
+    // session id.
+    resetToGuestSession();
     setUser(null);
     setMessages([]);
     setDocuments([]);
@@ -142,11 +166,16 @@ function App() {
       }
       if (successes.length > 0) {
         try { await fetchDocuments(); } catch (_) {}
+        if (isRealUser) {
+          for (const s of successes) {
+            saveDocumentToHistory(user.id, s.filename).catch(() => {});
+          }
+        }
       }
     } catch (err) {
       clearTimeout(safetyTimer);
       if (err.code === 'ERR_NETWORK' || err.message === 'Network Error') {
-        setError('Cannot connect to the backend server. Please make sure the Python backend is running on port 8000.');
+        setError('Could not reach the server. Please check your connection and try again — if you\'re inside an app\'s built-in browser (LinkedIn, Instagram, etc.), try opening this link in Chrome or Safari directly.');
       } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
         setError('Upload timed out. The file may be too large or the server is busy. Please try again.');
       } else {
@@ -172,6 +201,9 @@ function App() {
     try {
       await deleteDocument(filename);
       await fetchDocuments();
+      if (isRealUser) {
+        removeDocumentFromHistory(user.id, filename).catch(() => {});
+      }
     } catch (err) {
       console.error('Failed to delete document', err);
     }
@@ -184,11 +216,16 @@ function App() {
     setMessages(prev => [...prev, userMsg]);
     setInputMessage('');
     setIsTyping(true);
+    if (isRealUser) saveChatMessage(user.id, userMsg).catch(() => {});
     try {
       const response = await chatWithRag(userMsg.content);
-      setMessages(prev => [...prev, { role: 'bot', content: response.answer, sources: response.sources }]);
+      const botMsg = { role: 'bot', content: response.answer, sources: response.sources };
+      setMessages(prev => [...prev, botMsg]);
+      if (isRealUser) saveChatMessage(user.id, botMsg).catch(() => {});
     } catch (err) {
-      setMessages(prev => [...prev, { role: 'bot', content: 'Sorry, an error occurred while processing your request.', isError: true }]);
+      const errMsg = { role: 'bot', content: 'Sorry, an error occurred while processing your request.', isError: true };
+      setMessages(prev => [...prev, errMsg]);
+      if (isRealUser) saveChatMessage(user.id, errMsg).catch(() => {});
     } finally {
       setIsTyping(false);
     }
