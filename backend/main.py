@@ -66,7 +66,13 @@ SESSION_SWEEP_INTERVAL_SECONDS = int(os.environ.get("SESSION_SWEEP_INTERVAL_SECO
 
 
 async def _idle_session_sweeper():
-    """Background loop: purge any session idle longer than the TTL."""
+    """Background loop: purge any GUEST session idle longer than the TTL.
+
+    Signed-in users' sessions are prefixed 'user:<supabase_user_id>' and are
+    intentionally never auto-purged here — their document history is meant
+    to persist across visits. Only ephemeral guest sessions (random per-tab
+    UUIDs) get swept.
+    """
     while True:
         try:
             await asyncio.sleep(SESSION_SWEEP_INTERVAL_SECONDS)
@@ -74,6 +80,7 @@ async def _idle_session_sweeper():
             stale = [
                 sid for sid, last_seen in list(SESSION_LAST_SEEN.items())
                 if now - last_seen > SESSION_IDLE_TTL_SECONDS
+                and not sid.startswith("user:")
             ]
             for sid in stale:
                 removed = clear_session(sid)
@@ -117,11 +124,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-_credential_safe = ALLOWED_ORIGINS != ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=_credential_safe,
+    allow_credentials=False,  # not used — cookies/credentials are never sent
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Session-Id"],
 )
@@ -280,6 +286,14 @@ async def clear_session_endpoint(x_session_id: Optional[str] = Header(default=No
     session_id = get_session_id(x_session_id)
     if session_id == "default":
         raise HTTPException(status_code=400, detail="No session id provided.")
+    if session_id.startswith("user:"):
+        # Signed-in users keep their documents across sign-out — this route
+        # is only meant for guest cleanup. Frontend should not call this for
+        # authenticated users; this check is a server-side backstop.
+        raise HTTPException(
+            status_code=400,
+            detail="Signed-in user sessions are not cleared via this endpoint.",
+        )
     removed = clear_session(session_id)
     SESSION_LAST_SEEN.pop(session_id, None)
     logger.info("Session cleared: session=%s chunks_removed=%d", session_id, removed)
@@ -293,6 +307,10 @@ class SessionBeaconRequest(BaseModel):
 
 @app.post("/api/session/beacon-clear", tags=["Session"])
 async def clear_session_beacon(request: SessionBeaconRequest):
+    if request.session_id.startswith("user:"):
+        # Signed-in users' documents persist across tab closes — only guest
+        # sessions should ever be cleared this way.
+        return {"status": "skipped", "chunks_removed": 0}
     removed = clear_session(request.session_id)
     SESSION_LAST_SEEN.pop(request.session_id, None)
     logger.info("Session cleared via beacon: session=%s chunks_removed=%d", request.session_id, removed)
