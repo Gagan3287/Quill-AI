@@ -3,25 +3,54 @@ import axios from 'axios';
 // ─────────────────────────────────────────────────────────────────────────────
 // Session id
 //
-// One random id per browser TAB, stored in sessionStorage (not localStorage) so
-// it's automatically gone when the tab/window closes — nothing to "forget" to
-// clean up client-side. Every upload/chat/documents request sends this as
-// X-Session-Id so the backend can scope ChromaDB storage per-session instead
-// of sharing one global bucket across every guest that's ever visited.
+// Two modes:
+//   - Signed-in users: a STABLE id of the form "user:<supabase_user_id>",
+//     set via setAuthenticatedSessionId() right after login. This persists
+//     across reloads, tab closes, and logins — the backend exempts "user:"
+//     prefixed sessions from all auto-cleanup, so their documents survive.
+//   - Guests: a random id per browser TAB (sessionStorage), unchanged from
+//     before — cleared automatically on sign-out / tab-close / idle.
 // ─────────────────────────────────────────────────────────────────────────────
 const SESSION_KEY = 'quill_session_id';
+
+const generateGuestId = () =>
+  (crypto.randomUUID && crypto.randomUUID()) ||
+  `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const getSessionId = () => {
   let id = sessionStorage.getItem(SESSION_KEY);
   if (!id) {
-    id = (crypto.randomUUID && crypto.randomUUID()) ||
-      `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    id = generateGuestId();
     sessionStorage.setItem(SESSION_KEY, id);
   }
   return id;
 };
 
-export const sessionId = getSessionId();
+export let sessionId = getSessionId();
+
+/**
+ * Call this immediately after a successful sign-in with the Supabase user's
+ * id. Switches every subsequent request onto a stable, non-cleaned-up
+ * session so the signed-in user's documents and chat persist.
+ */
+export const setAuthenticatedSessionId = (supabaseUserId) => {
+  sessionId = `user:${supabaseUserId}`;
+  sessionStorage.setItem(SESSION_KEY, sessionId);
+  api.defaults.headers['X-Session-Id'] = sessionId;
+  return sessionId;
+};
+
+/**
+ * Call this on sign-out to drop back to a fresh, ephemeral guest session —
+ * so if the same browser continues as a guest, it doesn't inherit the
+ * previous user's session id.
+ */
+export const resetToGuestSession = () => {
+  sessionId = generateGuestId();
+  sessionStorage.setItem(SESSION_KEY, sessionId);
+  api.defaults.headers['X-Session-Id'] = sessionId;
+  return sessionId;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API URL resolution
@@ -125,9 +154,13 @@ export const deleteDocument = async (filename) => {
 };
 
 /**
- * Wipe every document belonging to this session. Call on explicit sign-out.
+ * Wipe every document belonging to this session. Only meaningful for guests
+ * — signed-in users' documents persist by design, so this is a no-op for
+ * "user:" sessions (the backend also refuses this, but skip the network
+ * call entirely rather than round-tripping to get rejected).
  */
 export const clearSession = async () => {
+  if (sessionId.startsWith('user:')) return { status: 'skipped', chunks_removed: 0 };
   const response = await api.delete('/session');
   return response.data;
 };
@@ -136,11 +169,11 @@ export const clearSession = async () => {
  * Best-effort cleanup for when the user just closes the tab instead of
  * clicking Sign Out (common for guests). sendBeacon fires even as the page
  * is unloading, where a normal axios/fetch call would get cancelled.
- * Note: sendBeacon only supports POST, so the backend also needs a POST
- * alias for /api/session/beacon-clear if you want this path covered too —
- * see main.py. Falls back to silently doing nothing if unsupported.
+ * Skipped entirely for signed-in users — their documents should survive a
+ * tab close, not just a clean sign-out.
  */
 export const clearSessionOnUnload = () => {
+  if (sessionId.startsWith('user:')) return;
   if (!navigator.sendBeacon) return;
   const url = `${resolveBaseUrl().replace(/\/$/, '')}/session/beacon-clear`;
   const blob = new Blob([JSON.stringify({ session_id: sessionId })], {
